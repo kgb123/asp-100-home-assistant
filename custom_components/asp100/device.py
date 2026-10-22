@@ -36,7 +36,8 @@ class DeviceUnavailable(Exception):
     """Device not found on the network or not responding."""
 
 
-def _discover(mac: str, timeout: float = 6.0) -> dict | None:
+# 1. Добавили zc в аргументы функции
+def _discover(zc: Zeroconf, mac: str, timeout: float = 6.0) -> dict | None:
     """Resolve a device by MAC via mDNS -> ip, port, pubkey (hex)."""
     mac = mac.lower().replace("-", ":")
     found: dict = {}
@@ -69,21 +70,27 @@ def _discover(mac: str, timeout: float = 6.0) -> dict | None:
             ipv4 = next((a for a in addrs if ":" not in a), addrs[0] if addrs else None)
             found.update(ip=ipv4, port=info.port, pubkey=props.get("public", ""))
 
-    zc = Zeroconf()
+    # 2. Убрали создание Zeroconf(), используем переданный zc
+    # Сохраняем ссылку на браузер, чтобы потом его остановить
+    browser = ServiceBrowser(zc, SERVICE_TYPE, _L())
     try:
-        ServiceBrowser(zc, SERVICE_TYPE, _L())
         end = time.time() + timeout
         while time.time() < end and "ip" not in found:
             time.sleep(0.2)
     finally:
-        zc.close()
+        # 3. Убрали zc.close() (его нельзя закрывать, он общий!)
+        # Вместо этого отменяем наш браузер, чтобы не оставлять фоновые потоки
+        browser.cancel()
+        
     return found if "ip" in found else None
 
 
 class Asp100Device:
     """High-level client for one breezer."""
 
-    def __init__(self, mac: str, token: str, host: str | None = None) -> None:
+    # 4. Добавили zc в конструктор класса
+    def __init__(self, zc: Zeroconf, mac: str, token: str, host: str | None = None) -> None:
+        self._zc = zc  # Сохраняем общий экземпляр
         self._mac = mac
         self._token = bytes.fromhex(token)
         self._host = host
@@ -99,7 +106,10 @@ class Asp100Device:
         """Discover ip + pubkey (cached). Pubkey only changes on factory reset."""
         if self._pubkey is not None and self._host is not None:
             return
-        dev = _discover(self._mac)
+        
+        # 5. Передаем сохраненный self._zc в функцию _discover
+        dev = _discover(self._zc, self._mac)
+        
         if not dev or not dev.get("pubkey"):
             raise DeviceUnavailable(f"{self._mac} not found via mDNS")
         if len(dev["pubkey"]) != 64:
