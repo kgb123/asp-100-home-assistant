@@ -5,6 +5,7 @@ from __future__ import annotations
 from homeassistant.components.climate import (
     ClimateEntity,
     ClimateEntityFeature,
+    HVACAction,
     HVACMode,
 )
 from homeassistant.config_entries import ConfigEntry
@@ -46,8 +47,10 @@ class Asp100Climate(Asp100Entity, ClimateEntity):
     _attr_max_temp = 25
     _attr_fan_modes = FAN_MODES
     _attr_preset_modes = PRESET_MODES  # manual / auto / night / turbo / fan
-    # TODO: distinguish FAN_ONLY (heater off) from HEAT once we know the heater-state opcode.
-    _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT]
+    
+    # ДОБАВЛЕН HVACMode.FAN_ONLY, чтобы HA мог отображать режим вентиляции
+    _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT, HVACMode.FAN_ONLY]
+    
     _attr_supported_features = (
         ClimateEntityFeature.TARGET_TEMPERATURE
         | ClimateEntityFeature.FAN_MODE
@@ -75,7 +78,33 @@ class Asp100Climate(Asp100Entity, ClimateEntity):
         mode = self._state.get("mode")
         if mode == PROGRAM_OFF or not self._state.get("speed"):
             return HVACMode.OFF
-        return HVACMode.HEAT
+            
+        # Динамическое определение режима
+        current = self._state.get("current_temperature")
+        target = self._state.get("target_temperature")
+        
+        # Если целевая температура выше текущей — отображаем Обогрев
+        if current is not None and target is not None and target > current:
+            return HVACMode.HEAT
+            
+        # Иначе отображаем Вентиляцию
+        return HVACMode.FAN_ONLY
+
+    @property
+    def hvac_action(self) -> HVACAction:
+        """Обогрев = target > current, иначе вентиляция.
+
+        У ASP-100 нет отдельного опкода состояния нагревателя — прошивка
+        греет автоматически, пока входящий воздух холоднее целевой.
+        Приближаем реальное состояние по разнице температур.
+        """
+        if self._state.get("mode") == PROGRAM_OFF or not self._state.get("speed"):
+            return HVACAction.OFF
+        current = self._state.get("current_temperature")
+        target = self._state.get("target_temperature")
+        if current is not None and target is not None and target > current:
+            return HVACAction.HEATING
+        return HVACAction.FAN
 
     @property
     def fan_mode(self) -> str | None:
@@ -103,6 +132,14 @@ class Asp100Climate(Asp100Entity, ClimateEntity):
         # on/off = program (CmdMode 0x01): 0 = Off, 1 = manual (verified on hardware)
         program = PROGRAM_OFF if hvac_mode == HVACMode.OFF else PROGRAM_MANUAL
         await self.coordinator.async_send(self.coordinator.device.set_mode, program)
+        
+        # Если пользователь явно выбрал "Только вентиляция", 
+        # можно принудительно снизить целевую температуру до минимума, 
+        # чтобы обогрев гарантированно не включился.
+        if hvac_mode == HVACMode.FAN_ONLY:
+            await self.coordinator.async_send(
+                self.coordinator.device.set_target_temperature, float(self._attr_min_temp)
+            )
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         # presets are the operating programs; turbo = program 4 (CmdMode=4)
@@ -110,7 +147,8 @@ class Asp100Climate(Asp100Entity, ClimateEntity):
         await self.coordinator.async_send(self.coordinator.device.set_mode, program)
 
     async def async_turn_on(self) -> None:
-        await self.async_set_hvac_mode(HVACMode.HEAT)
+        # Включаем как вентиляцию (если temp < current, HA сам покажет HEAT)
+        await self.async_set_hvac_mode(HVACMode.FAN_ONLY)
 
     async def async_turn_off(self) -> None:
         await self.async_set_hvac_mode(HVACMode.OFF)
