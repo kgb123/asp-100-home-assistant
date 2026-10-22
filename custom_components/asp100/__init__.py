@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from homeassistant.components import zeroconf
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
@@ -20,11 +21,18 @@ PLATFORMS: list[Platform] = [
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up ASP-100 from a config entry."""
+    
+    # Получаем общий экземпляр Zeroconf от Home Assistant
+    shared_zc = await zeroconf.async_get_instance(hass)
+    
+    # Передаем его первым аргументом в устройство
     device = Asp100Device(
+        zc=shared_zc,
         mac=entry.data[CONF_MAC],
         token=entry.data[CONF_TOKEN],
         host=entry.data.get(CONF_HOST),
     )
+    
     coordinator = Asp100Coordinator(hass, entry, device)
     await coordinator.async_config_entry_first_refresh()
 
